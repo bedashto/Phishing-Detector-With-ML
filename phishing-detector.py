@@ -715,4 +715,297 @@ class PhishingDetector:
             logger.error(f"Error during URL prediction: {e}")
             raise
     
-    def predict_
+    def predict_email(self, email_content, is_file=False):
+        """Predict if an email is phishing or legitimate"""
+        if not self.model:
+            raise ValueError("Model not loaded or trained")
+            
+        try:
+            # Extract features from email
+            features = self.email_analyzer.extract_features(email_content, is_file)
+            if not features:
+                return {
+                    'error': 'Could not parse email content'
+                }
+            
+            # Prepare features for prediction
+            X = self.prepare_features_for_model(features, type='email')
+            
+            # Make prediction
+            prediction = self.model.predict(X)[0]
+            probability = self.model.predict_proba(X)[0][1]  # Probability of being phishing
+            
+            # Get URLs from email for further analysis
+            email_msg = self.email_analyzer.parse_email(email_content, is_file)
+            email_text = self.email_analyzer.get_email_text(email_msg)
+            
+            # Extract HTML content if available
+            html_content = None
+            if email_msg.is_multipart():
+                for part in email_msg.walk():
+                    if part.get_content_type() == 'text/html':
+                        html_content = self.email_analyzer.extract_text_from_part(part)
+                        break
+            elif email_msg.get_content_type() == 'text/html':
+                html_content = self.email_analyzer.extract_text_from_part(email_msg)
+            
+            # Extract and analyze URLs from email
+            urls = self.email_analyzer.extract_urls(email_text, html_content)
+            url_analysis = []
+            
+            for url in urls[:5]:  # Analyze up to 5 URLs to limit processing time
+                try:
+                    url_result = self.predict_url(url, fetch_content=False)
+                    url_analysis.append({
+                        'url': url,
+                        'is_phishing': url_result['is_phishing'],
+                        'probability': url_result['probability']
+                    })
+                except Exception as e:
+                    url_analysis.append({
+                        'url': url,
+                        'error': str(e)
+                    })
+            
+            return {
+                'is_phishing': bool(prediction),
+                'probability': float(probability),
+                'features': features,
+                'urls_found': urls,
+                'url_analysis': url_analysis
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during email prediction: {e}")
+            raise
+    
+    def analyze_urls_from_file(self, file_path, output_path=None, fetch_content=True):
+        """Analyze multiple URLs from a file and save results"""
+        try:
+            with open(file_path, 'r') as f:
+                urls = [line.strip() for line in f if line.strip()]
+            
+            results = []
+            for url in urls:
+                try:
+                    result = self.predict_url(url, fetch_content)
+                    results.append(result)
+                    status = "PHISHING" if result['is_phishing'] else "LEGITIMATE"
+                    logger.info(f"URL: {url} - {status} ({result['probability']:.2f})")
+                except Exception as e:
+                    logger.warning(f"Error analyzing URL {url}: {e}")
+                    results.append({
+                        'url': url,
+                        'error': str(e)
+                    })
+            
+            # Save results if output path is provided
+            if output_path:
+                with open(output_path, 'w') as f:
+                    for result in results:
+                        if 'error' in result:
+                            f.write(f"{result['url']},ERROR,{result['error']}\n")
+                        else:
+                            f.write(f"{result['url']},{int(result['is_phishing'])},{result['probability']:.4f}\n")
+                logger.info(f"Results saved to {output_path}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error analyzing URLs from file: {e}")
+            raise
+    
+    def analyze_emails_from_directory(self, directory_path, output_path=None):
+        """Analyze multiple emails from a directory and save results"""
+        try:
+            if not os.path.isdir(directory_path):
+                raise ValueError(f"Directory not found: {directory_path}")
+            
+            # Get all files from directory
+            email_files = [os.path.join(directory_path, f) for f in os.listdir(directory_path) 
+                          if os.path.isfile(os.path.join(directory_path, f))]
+            
+            results = []
+            for email_file in email_files:
+                try:
+                    result = self.predict_email(email_file, is_file=True)
+                    result['filename'] = os.path.basename(email_file)
+                    results.append(result)
+                    status = "PHISHING" if result['is_phishing'] else "LEGITIMATE"
+                    logger.info(f"Email: {email_file} - {status} ({result['probability']:.2f})")
+                except Exception as e:
+                    logger.warning(f"Error analyzing email {email_file}: {e}")
+                    results.append({
+                        'filename': os.path.basename(email_file),
+                        'error': str(e)
+                    })
+            
+            # Save results if output path is provided
+            if output_path:
+                with open(output_path, 'w') as f:
+                    # Write header
+                    f.write("filename,is_phishing,probability,urls_found\n")
+                    for result in results:
+                        if 'error' in result:
+                            f.write(f"{result['filename']},ERROR,0.0,0\n")
+                        else:
+                            url_count = len(result.get('urls_found', []))
+                            f.write(f"{result['filename']},{int(result['is_phishing'])},{result['probability']:.4f},{url_count}\n")
+                logger.info(f"Results saved to {output_path}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error analyzing emails from directory: {e}")
+            raise
+
+def main():
+    """Main function to handle command-line interface"""
+    parser = argparse.ArgumentParser(description="Phishing Detector for URLs and Emails")
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+    
+    # Train command
+    train_parser = subparsers.add_parser("train", help="Train the model")
+    train_parser.add_argument("--dataset", "-d", required=True, help="Path to dataset CSV file")
+    train_parser.add_argument("--output", "-o", default="models", help="Directory to save model")
+    train_parser.add_argument("--type", "-t", choices=['url', 'email'], default='url', 
+                             help="Type of dataset: 'url' or 'email'")
+    
+    # URL prediction command
+    url_parser = subparsers.add_parser("url", help="Predict if a URL is phishing")
+    url_parser.add_argument("--url", "-u", help="URL to analyze")
+    url_parser.add_argument("--file", "-f", help="File containing URLs to analyze (one per line)")
+    url_parser.add_argument("--model", "-m", default="models", help="Directory with model files")
+    url_parser.add_argument("--output", "-o", help="Path to save results")
+    url_parser.add_argument("--no-fetch", action="store_true", help="Do not fetch HTML content")
+    
+    # Email prediction command
+    email_parser = subparsers.add_parser("email", help="Predict if an email is phishing")
+    email_parser.add_argument("--file", "-f", help="Path to email file")
+    email_parser.add_argument("--directory", "-d", help="Directory containing email files")
+    email_parser.add_argument("--model", "-m", default="models", help="Directory with model files")
+    email_parser.add_argument("--output", "-o", help="Path to save results")
+    
+    args = parser.parse_args()
+    
+    if args.command == "train":
+        detector = PhishingDetector()
+        metrics = detector.train(args.dataset, data_type=args.type)
+        detector.save_model(args.output)
+        
+        print(f"\nTraining completed with accuracy: {metrics['accuracy']:.4f}")
+        print("\nConfusion Matrix:")
+        cm = np.array(metrics['confusion_matrix'])
+        print(f"TN: {cm[0,0]}, FP: {cm[0,1]}")
+        print(f"FN: {cm[1,0]}, TP: {cm[1,1]}")
+        
+    elif args.command == "url":
+        detector = PhishingDetector(args.model)
+        
+        if args.url:
+            result = detector.predict_url(args.url, fetch_content=not args.no_fetch)
+            status = "PHISHING" if result['is_phishing'] else "LEGITIMATE"
+            print(f"\nURL: {args.url}")
+            print(f"Status: {status}")
+            print(f"Confidence: {result['probability']:.2f}")
+            
+            # Print some important features
+            print("\nKey Features:")
+            features = result['features']
+            if 'suspicious_words' in features:
+                print(f"- Suspicious words: {features['suspicious_words']}")
+            if 'has_https' in features:
+                print(f"- HTTPS: {'Yes' if features['has_https'] else 'No'}")
+            if 'domain_age' in features and features['domain_age'] > 0:
+                print(f"- Domain age: {features['domain_age']} days")
+            if 'password_fields' in features:
+                print(f"- Password fields: {features['password_fields']}")
+            
+        elif args.file:
+            results = detector.analyze_urls_from_file(
+                args.file, 
+                args.output if args.output else None,
+                fetch_content=not args.no_fetch
+            )
+            
+            print(f"\nAnalyzed {len(results)} URLs:")
+            phishing_count = sum(1 for r in results if 'is_phishing' in r and r['is_phishing'])
+            print(f"- Phishing: {phishing_count}")
+            print(f"- Legitimate: {len(results) - phishing_count - sum(1 for r in results if 'error' in r)}")
+            print(f"- Errors: {sum(1 for r in results if 'error' in r)}")
+            
+            if args.output:
+                print(f"\nResults saved to {args.output}")
+        else:
+            print("Error: Either --url or --file must be specified.")
+            
+    elif args.command == "email":
+        detector = PhishingDetector(args.model)
+        
+        if args.file:
+            result = detector.predict_email(args.file, is_file=True)
+            
+            if 'error' in result:
+                print(f"Error analyzing email: {result['error']}")
+            else:
+                status = "PHISHING" if result['is_phishing'] else "LEGITIMATE"
+                print(f"\nEmail: {args.file}")
+                print(f"Status: {status}")
+                print(f"Confidence: {result['probability']:.2f}")
+                
+                # Print URLs found
+                urls = result.get('urls_found', [])
+                if urls:
+                    print(f"\nFound {len(urls)} URLs in the email:")
+                    for i, url in enumerate(urls[:5], 1):  # Show up to 5 URLs
+                        print(f"  {i}. {url}")
+                    
+                    if len(urls) > 5:
+                        print(f"  ... and {len(urls) - 5} more")
+                
+                # Print URL analysis
+                url_analysis = result.get('url_analysis', [])
+                if url_analysis:
+                    print("\nURL Analysis:")
+                    for analysis in url_analysis:
+                        if 'error' in analysis:
+                            print(f"  - {analysis['url']}: Error - {analysis['error']}")
+                        else:
+                            status = "PHISHING" if analysis['is_phishing'] else "LEGITIMATE"
+                            print(f"  - {analysis['url']}: {status} ({analysis['probability']:.2f})")
+                
+                # Print key features
+                print("\nKey Email Features:")
+                features = result['features']
+                if 'subject_suspicious_words' in features:
+                    print(f"- Suspicious words in subject: {features['subject_suspicious_words']}")
+                if 'body_suspicious_words' in features:
+                    print(f"- Suspicious words in body: {features['body_suspicious_words']}")
+                if 'reply_to_mismatch' in features and features['reply_to_mismatch']:
+                    print(f"- Reply-To mismatch detected")
+                if 'has_urgent_language' in features and features['has_urgent_language']:
+                    print(f"- Urgent language detected")
+                if 'display_name_contains_domain' in features and not features['display_name_contains_domain']:
+                    print(f"- Sender display name does not match domain")
+                    
+        elif args.directory:
+            results = detector.analyze_emails_from_directory(
+                args.directory,
+                args.output if args.output else None
+            )
+            
+            print(f"\nAnalyzed {len(results)} emails:")
+            phishing_count = sum(1 for r in results if 'is_phishing' in r and r['is_phishing'])
+            print(f"- Phishing: {phishing_count}")
+            print(f"- Legitimate: {len(results) - phishing_count - sum(1 for r in results if 'error' in r)}")
+            print(f"- Errors: {sum(1 for r in results if 'error' in r)}")
+            
+            if args.output:
+                print(f"\nResults saved to {args.output}")
+        else:
+            print("Error: Either --file or --directory must be specified.")
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
