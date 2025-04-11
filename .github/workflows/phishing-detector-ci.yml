@@ -33,9 +33,16 @@ jobs:
           # exit-zero treats all errors as warnings
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
+      - name: List repository files
+        run: |
+          ls -la
+          echo "Looking for the main Python script..."
+          find . -name "*.py" -type f
+
       - name: Check if script is executable
         run: |
-          python -c "import phishing_detector" || echo "Module import check failed"
+          # Try to run the script directly
+          python -c "import sys; sys.path.append('.'); from phishing-detector import PhishingDetector" || echo "Module import check failed, but continuing workflow"
 
       - name: Create dummy dataset for training
         run: |
@@ -48,7 +55,7 @@ jobs:
 
       - name: Test model training
         run: |
-          python phishing_detector.py train --dataset dummy_url_dataset.csv --type url --output test_models
+          python phishing-detector.py train --dataset dummy_url_dataset.csv --type url --output test_models
           # Check if model files were created
           ls -la test_models/
 
@@ -56,6 +63,6 @@ jobs:
         run: |
           echo 'https://example.com' > test_urls.txt
           echo 'https://suspicious-site.com/login' >> test_urls.txt
-          python phishing_detector.py url --file test_urls.txt --model test_models/ --output test_results.csv --no-fetch
+          python phishing-detector.py url --file test_urls.txt --model test_models/ --output test_results.csv --no-fetch
           # Check if results file was created
           cat test_results.csv
